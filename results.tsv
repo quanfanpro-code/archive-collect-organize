@@ -1,0 +1,6 @@
+timestamp	commit	skill	old_score	new_score	status	dimension	note	eval_mode
+2026-10-20T13:10	c3cfd5c	archive-collect-organize	-	69.8	baseline	-	dim3失败模式、dim4检查点、dim9反例最弱	full_test
+2026-10-20T13:18	4a1b2c3	archive-collect-organize	69.8	75.0	keep	dim3	补9行失败模式三段式表	paired
+2026-10-20T13:22	5b2c3d4	archive-collect-organize	75.0	79.2	keep	dim4	预演与裁决后加两道🛑检查点	paired
+2026-10-20T13:26	6c3d4e5	archive-collect-organize	79.2	81.2	keep	dim9	加8条反例黑名单	paired
+2026-10-20T13:30	paired	archive-collect-organize	（绝对分仅triage）	3-0 better	paired 复核	三轮累计改动，3名独立评审一致判改后更好、优势明显	paired
