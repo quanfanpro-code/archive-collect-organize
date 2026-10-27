@@ -85,7 +85,9 @@ python scripts/resolve_conflicts.py --root "D:\资料包" --apply
 
 ## 配置
 
-`config/mapping.example.json` 说明分类映射结构：`archives` 指定包到目录，`rules` 按目录名分流，`scatter` 按文件名关键字归位散文件。没有配置时按压缩包内首层目录名原样还原结构。
+`config/mapping.example.json` 说明分类映射结构：`archives` 指定包到目录，`rules` 按目录名分流，`scatter` 按文件名关键字归位散文件，`exclude` 列出不处理的压缩包（如工作底稿内部的证据包）。没有配置时按压缩包内首层目录名原样还原结构。
+
+文件名编码：Mac 打包（UTF-8 字节未标 flag）与 Windows 老式打包（GBK 字节）都会自动还原；Mac 垃圾条目（`__MACOSX`、`.DS_Store`、`._*`）自动跳过。仅支持 zip，7z/rar/加密包/分卷包会列入失败清单。
 
 ## 反例黑名单（这些动作一律不做）
 
