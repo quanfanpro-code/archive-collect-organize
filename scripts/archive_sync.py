@@ -35,9 +35,13 @@ def sha256(path, chunk=1 << 20):
 
 
 def member_name(info):
-    """Windows 压缩包未标 UTF-8 时按 cp437 解码，需还原成 GBK。"""
+    """未标UTF-8的文件名先尝试UTF-8字节，再尝试GBK字节。"""
     if info.flag_bits & 0x800:
         return info.filename
+    try:
+        return info.filename.encode("cp437").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
     try:
         return info.filename.encode("cp437").decode("gbk")
     except Exception:
@@ -99,13 +103,14 @@ def unique_path(target):
 
 def load_config(path):
     if not path or not os.path.exists(path):
-        return {"archives": {}, "rules": [], "scatter": {}, "fallback": "_待归类"}
+        return {"archives": {}, "rules": [], "scatter": {}, "fallback": "_待归类", "exclude": []}
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
     cfg.setdefault("archives", {})
     cfg.setdefault("rules", [])
     cfg.setdefault("scatter", {})
     cfg.setdefault("fallback", "_待归类")
+    cfg.setdefault("exclude", [])
     return cfg
 
 
@@ -145,6 +150,8 @@ def sync(root, cfg, apply_):
 
     for zpath in zips:
         zip_name = os.path.basename(zpath)
+        if zip_name in cfg.get("exclude", []):
+            continue
         res = {"copied": 0, "skipped": 0, "conflicts": 0, "failed": 0}
         try:
             z = zipfile.ZipFile(zpath)
@@ -158,6 +165,10 @@ def sync(root, cfg, apply_):
                 if info.is_dir():
                     continue
                 rel = member_name(info).replace("\\", "/")
+                segments = rel.split("/")
+                if segments[0] == "__MACOSX" or segments[-1] == ".DS_Store" or segments[-1].startswith("._"):
+                    res["skipped"] += 1
+                    continue
                 try:
                     safe_target(root, rel)
                     rel_target = route(zip_name, rel, cfg)
