@@ -3,4 +3,8 @@ timestamp	commit	skill	old_score	new_score	status	dimension	note	eval_mode
 2026-10-20T13:18	4a1b2c3	archive-collect-organize	69.8	75.0	keep	dim3	补9行失败模式三段式表	paired
 2026-10-20T13:22	5b2c3d4	archive-collect-organize	75.0	79.2	keep	dim4	预演与裁决后加两道🛑检查点	paired
 2026-10-20T13:26	6c3d4e5	archive-collect-organize	79.2	81.2	keep	dim9	加8条反例黑名单	paired
-2026-10-20T13:30	paired	archive-collect-organize	（绝对分仅triage）	3-0 better	paired 复核	三轮累计改动，3名独立评审一致判改后更好、优势明显	paired
+2026-10-20T13:30	paired	archive-collect-organize	-	-	legacy_unparsed	historical	"[""2026-10-20T13:30"", ""paired"", ""archive-collect-organize"", ""（绝对分仅triage）"", ""3-0 better"", ""paired 复核"", ""三轮累计改动，3名独立评审一致判改后更好、优势明显"", ""paired""]"	unverified
+2026-11-02T10:56:07+08:00	54adddc	archive-collect-organize	-	75.3	baseline	-	独立静态加三类with-skill/no-skill实测；runtime_warn=0；绝对分仅triage	full_test
+2026-11-02T10:56:07+08:00	74a44cc	archive-collect-organize	75.3参考	3-0 better	keep	dim5/泛化与完整性	3名独立评审均clear；六项已复现边界由失败转通过；普通样本两版均28份无损	paired
+2026-11-02T10:56:07+08:00	d40facb	archive-collect-organize	保留版B	3-0 better	keep	dim5/来源与执行边界	3名独立评审均clear；新增四项反例由失败转通过；最终三类实测28份无损且增量无副本	paired
+2026-11-02T10:56:07+08:00	d40facb	archive-collect-organize	-	-	validated	full_test	四组×三类共12次真实场景；最终35项自动验证通过，含10项新增失败反例修复与2项远端兼容验证；无dry_run	full_test
