@@ -12,10 +12,10 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 import unicodedata
 import zipfile
 from datetime import datetime
+from pathlib import Path, PureWindowsPath
 
 REPORT_DIR = "_整理报告"
 SKIP_DIRS = {REPORT_DIR, "_旧版本"}
@@ -44,37 +44,33 @@ def member_name(info):
         return info.filename
 
 
-def extract_zip(zpath, outdir):
-    """按修正名解压，返回 [{'rel','size','zip_time'}]。zipfile 的 extractall 不保留时间，故自行记录。"""
-    entries = []
-    with zipfile.ZipFile(zpath) as z:
-        for info in z.infolist():
-            if info.is_dir():
-                continue
-            rel = member_name(info).replace("\\", "/")
-            if not rel or rel.startswith("../") or rel.endswith(":") or rel.startswith("/"):
-                continue
-            dst = os.path.join(outdir, *rel.split("/"))
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            with z.open(info) as src, open(dst, "wb") as f:
-                shutil.copyfileobj(src, f)
-            entries.append({
-                "rel": rel,
-                "size": info.file_size,
-                "zip_time": "%04d-%02d-%02d %02d:%02d" % info.date_time[:5],
-            })
-    return entries
+def safe_target(root, rel):
+    """拒绝越界路径与Windows非法名称；不改写合法的中文文件名。"""
+    rel = str(rel).replace("\\", "/")
+    parts = rel.split("/")
+    if PureWindowsPath(rel).drive or any(
+        p in ("", ".", "..") or p.endswith((" ", "."))
+        or any(c in p for c in '<>:"|?*') or os.path.isreserved(p)
+        for p in parts
+    ):
+        raise ValueError("非法相对路径: " + rel)
+    base = Path(root).resolve()
+    target = base.joinpath(*parts).resolve()
+    if not target.is_relative_to(base):
+        raise ValueError("路径超出资料目录: " + rel)
+    return target
 
 
 def build_index(root):
-    """归一化文件名 -> [(大小, 绝对路径)]，用于跨目录去重与撞名判定。"""
+    """完整相对目标路径 -> [(大小, 绝对路径)]；不跨目录比较文件名。"""
     idx = {}
     for dirpath, dirnames, files in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for f in files:
             p = os.path.join(dirpath, f)
             try:
-                idx.setdefault(norm(f), []).append((os.path.getsize(p), p))
+                key = os.path.relpath(p, root).replace("\\", "/").casefold()
+                idx.setdefault(key, []).append((os.path.getsize(p), p))
             except OSError:
                 continue
     return idx
@@ -133,9 +129,11 @@ def route(zip_name, rel, cfg):
 
 
 def sync(root, cfg, apply_):
+    """只负责解压补缺，不能据此宣称业务归类已完成。预演也保留待写路径索引。"""
     idx = build_index(root)
+    digests = {}
     report = {"root": root, "generated": datetime.now().strftime("%Y-%m-%d %H:%M"), "zips": {},
-              "copied": [], "conflicts": [], "failed": []}
+              "copied": [], "conflicts": [], "failed": [], "stage": "仅解压补缺，业务归类另行执行"}
 
     zips = []
     for dirpath, dirnames, files in os.walk(root):
@@ -148,69 +146,73 @@ def sync(root, cfg, apply_):
     for zpath in zips:
         zip_name = os.path.basename(zpath)
         res = {"copied": 0, "skipped": 0, "conflicts": 0, "failed": 0}
-        stage = tempfile.mkdtemp(prefix="archive_sync_")
         try:
-            entries = extract_zip(zpath, stage)
+            z = zipfile.ZipFile(zpath)
         except Exception as e:
             res["failed"] += 1
             report["failed"].append({"zip": zip_name, "reason": "解压失败: %s" % e})
             report["zips"][zip_name] = res
-            shutil.rmtree(stage, ignore_errors=True)
             continue
-
-        for e in entries:
-            src = os.path.join(stage, *e["rel"].split("/"))
-            rel_target = route(zip_name, e["rel"], cfg)
-            if not rel_target:
-                continue
-            dst = os.path.join(root, *rel_target.split("/"))
-            name = os.path.basename(rel_target)
-            hits = idx.get(norm(name), [])
-            same = False
-            if hits:
-                digest = sha256(src)
-                for size, exist in hits:
-                    if size == e["size"] and sha256(exist) == digest:
-                        same = True
-                        break
-            if same:
-                res["skipped"] += 1
-                continue
-            if hits:
-                # L2：同名但内容不同，保留双方
-                stem, ext = os.path.splitext(dst)
-                dst = unique_path("%s_补-%s%s" % (stem, os.path.splitext(zip_name)[0], ext))
-                report["conflicts"].append({
-                    "dir": os.path.dirname(rel_target) or ".",
-                    "existing": hits[0][1],
-                    "added": os.path.relpath(dst, root),
-                    "size_existing": hits[0][0],
-                    "size_added": e["size"],
-                    "zip_time": e["zip_time"],
-                })
-                res["conflicts"] += 1
-            else:
-                dst = unique_path(dst)
-
-            try:
-                if apply_:
-                    os.makedirs(os.path.dirname(dst), exist_ok=True)
-                    shutil.copy2(src, dst)
-                report["copied"].append({
-                    "path": os.path.relpath(dst, root),
-                    "size": e["size"],
-                    "zip": zip_name,
-                    "zip_time": e["zip_time"],
-                    "written": bool(apply_),
-                })
-                if apply_:
-                    idx.setdefault(norm(name), []).append((e["size"], dst))
-                res["copied"] += 1
-            except Exception as ex:
-                res["failed"] += 1
-                report["failed"].append({"file": rel_target, "reason": str(ex)})
+        with z:
+            for info in z.infolist():
+                if info.is_dir():
+                    continue
+                rel = member_name(info).replace("\\", "/")
+                try:
+                    safe_target(root, rel)
+                    rel_target = route(zip_name, rel, cfg)
+                    if not rel_target:
+                        continue
+                    dst = str(safe_target(root, rel_target))
+                    h = hashlib.sha256()
+                    with z.open(info) as src:
+                        for block in iter(lambda: src.read(1 << 20), b""):
+                            h.update(block)
+                    digest = h.hexdigest()
+                    key = os.path.relpath(dst, root).replace("\\", "/").casefold()
+                    hits = idx.get(key, [])
+                    existing = hits[0] if hits else None
+                    counter = 1
+                    # 同一路径才比较；内容不同则增加来源子目录，保持文件原名。
+                    while hits:
+                        size, exist = hits[0]
+                        if exist not in digests:
+                            digests[exist] = sha256(exist)
+                        if size == info.file_size and digests[exist] == digest:
+                            break
+                        tag = os.path.splitext(zip_name)[0] + ("-%d" % counter if counter > 1 else "")
+                        rel_dst = os.path.join(os.path.dirname(rel_target), "_同路径并存", tag, os.path.basename(rel_target))
+                        dst = str(safe_target(root, rel_dst))
+                        key = os.path.relpath(dst, root).replace("\\", "/").casefold()
+                        hits = idx.get(key, [])
+                        counter += 1
+                    if hits:
+                        res["skipped"] += 1
+                        continue
+                    zip_time = datetime(*info.date_time).strftime("%Y-%m-%d %H:%M:%S")
+                    if existing:
+                        report["conflicts"].append({"dir": os.path.dirname(rel_target) or ".",
+                            "existing": existing[1], "added": os.path.relpath(dst, root),
+                            "size_existing": existing[0], "size_added": info.file_size, "zip_time": zip_time})
+                        res["conflicts"] += 1
+                    if apply_:
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        with z.open(info) as src, open(dst, "xb") as output:
+                            shutil.copyfileobj(src, output)
+                        moment = datetime(*info.date_time).timestamp()
+                        os.utime(dst, (moment, moment))
+                        if sha256(dst) != digest:
+                            raise ValueError("解压回读核验不一致: " + rel_target)
+                    report["copied"].append({"path": os.path.relpath(dst, root), "size": info.file_size,
+                        "zip": zip_name, "source": rel, "zip_time": zip_time,
+                        "sha256": digest, "written": bool(apply_)})
+                    idx[key] = [(info.file_size, dst)]
+                    digests[dst] = digest
+                    res["copied"] += 1
+                except Exception as ex:
+                    res["failed"] += 1
+                    report["failed"].append({"zip": zip_name, "file": rel, "reason": str(ex)})
         report["zips"][zip_name] = res
-        shutil.rmtree(stage, ignore_errors=True)
     write_report(root, report)
     return report
 
@@ -218,8 +220,9 @@ def sync(root, cfg, apply_):
 def write_report(root, report):
     outdir = os.path.join(root, REPORT_DIR)
     os.makedirs(outdir, exist_ok=True)
-    out = os.path.join(outdir, "archive_sync.json")
-    with open(out, "w", encoding="utf-8") as f:
+    out = unique_path(os.path.join(outdir, "archive_sync.json"))
+    report["report_path"] = out
+    with open(out, "x", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=1)
     return out
 
@@ -233,13 +236,17 @@ def scatter(root, cfg, apply_):
             continue
         for kw, target in cfg["scatter"].items():
             if kw in f:
-                dst_dir = os.path.join(root, *target.split("/"))
-                dst = unique_path(os.path.join(dst_dir, f))
-                if apply_:
-                    os.makedirs(dst_dir, exist_ok=True)
-                    shutil.move(p, dst)
+                dst_dir = str(safe_target(root, target))
+                dst = os.path.join(dst_dir, f)
+                if os.path.exists(dst):
+                    raise FileExistsError("归位目标已存在，请增加来源子目录，不改文件名: " + dst)
                 moved.append({"from": f, "to": os.path.relpath(dst, root), "written": bool(apply_)})
                 break
+    if apply_:
+        for item in moved:
+            dst = str(safe_target(root, item["to"]))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.rename(os.path.join(root, item["from"]), dst)
     return moved
 
 
@@ -256,14 +263,14 @@ def main():
     if a.scatter:
         report["scattered"] = scatter(root, cfg, a.apply)
         write_report(root, report)
-    out = os.path.join(root, REPORT_DIR, "archive_sync.json")
+    out = report["report_path"]
     print("压缩包 %d 个，待复制 %d，已存在跳过 %d，冲突 %d，失败 %d"
           % (len(report["zips"]), len(report["copied"]),
              sum(z["skipped"] for z in report["zips"].values()),
              len(report["conflicts"]), len(report["failed"])))
     print("报告:", out)
     if not a.apply:
-        print("（预演模式，未写入任何文件；加 --apply 执行）")
+        print("（预演仅写报告，未改动资料文件；加 --apply 执行。解压后仍需业务归类。）")
 
 
 if __name__ == "__main__":

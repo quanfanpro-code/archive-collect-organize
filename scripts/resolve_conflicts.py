@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-"""resolve_conflicts — 撞名冲突按修改时间取新，旧版移入同级 _旧版本
+"""resolve_conflicts — 兼容旧版补文件的核查工具，默认保留双方。
 
 用法：
-    python resolve_conflicts.py --root <目标目录> [--report <archive_sync.json>] [--apply]
+    python resolve_conflicts.py --root <目标目录> [--report <报告>] [--by-time] [--apply]
 
-比较两侧：压缩包内修改时间（ZipInfo.date_time，入包时的真实时间）与现有文件修改时间。
-差值超过 60 秒才判定；相同则不动。不加 --apply 只生成 decisions.csv，不移动任何文件。
+只有用户另行授权按时间处理时才传入 --by-time。跨目录文件始终不作版本裁决。
 """
 import argparse
 import csv
@@ -15,6 +14,8 @@ import re
 import sys
 import zipfile
 from datetime import datetime
+from pathlib import Path
+from archive_sync import unique_path
 
 OLD_DIR = "_旧版本"
 REPORT_DIR = "_整理报告"
@@ -55,6 +56,8 @@ def zip_entry_times(root):
                         key = name.casefold().strip()
                         if key not in table:
                             table[key] = (datetime(*info.date_time[:6]), f)
+                        else:
+                            table[key] = None
             except Exception:
                 continue
     return table
@@ -115,11 +118,11 @@ def move_to_old(path):
     old_dir = os.path.join(os.path.dirname(path), OLD_DIR)
     os.makedirs(old_dir, exist_ok=True)
     dst = _unique(os.path.join(old_dir, os.path.basename(path)))
-    os.replace(path, dst)
+    os.rename(path, dst)
     return dst
 
 
-def resolve(root, report_path, apply_):
+def resolve(root, report_path, apply_, by_time=False):
     zip_times = zip_entry_times(root)
     if report_path and os.path.exists(report_path):
         pairs = pairs_from_report(report_path, root)
@@ -130,16 +133,24 @@ def resolve(root, report_path, apply_):
     for p in pairs:
         existing = p["existing"]
         added = p["added"]
+        for path in (existing, added):
+            if not Path(path).resolve().is_relative_to(Path(root).resolve()):
+                raise ValueError("报告路径超出资料目录: " + path)
         if not (os.path.isfile(existing) and os.path.isfile(added)):
             continue
         t_exist = datetime.fromtimestamp(os.path.getmtime(existing))
         t_add = parse_time(p["zip_time"]) if p["zip_time"] else None
         if t_add is None:
             name = os.path.basename(existing).casefold().strip()
-            t_add = zip_times[name][0] if name in zip_times else None
+            evidence = zip_times.get(name)
+            t_add = evidence[0] if evidence else None
 
         winner, action = None, "时间缺失，未处理"
-        if t_add is not None:
+        if Path(existing).resolve().parent != Path(added).resolve().parent:
+            action = "不同目录的文件，保留双方，不判定新旧"
+        elif not by_time:
+            action = "未授权按时间判定，保留双方"
+        elif t_add is not None:
             delta = (t_add - t_exist).total_seconds()
             if delta > 60:
                 winner, action = "压缩包版本", "现有文件移入 _旧版本，补文件改回原名"
@@ -151,7 +162,7 @@ def resolve(root, report_path, apply_):
         if apply_ and winner:
             if winner == "压缩包版本":
                 move_to_old(existing)
-                os.replace(added, existing)
+                os.rename(added, existing)
             else:
                 move_to_old(added)
 
@@ -174,12 +185,12 @@ FIELDS = ["目录", "现有文件", "压缩包版本", "现有修改时间", "�
 def write_decisions(root, decisions):
     outdir = os.path.join(root, REPORT_DIR)
     os.makedirs(outdir, exist_ok=True)
-    csv_path = os.path.join(outdir, "decisions.csv")
-    with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+    csv_path = unique_path(os.path.join(outdir, "decisions.csv"))
+    with open(csv_path, "x", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS)
         w.writeheader()
         w.writerows(decisions)
-    with open(os.path.join(outdir, "decisions.json"), "w", encoding="utf-8") as f:
+    with open(unique_path(os.path.join(outdir, "decisions.json")), "x", encoding="utf-8") as f:
         json.dump(decisions, f, ensure_ascii=False, indent=1)
     return csv_path
 
@@ -189,13 +200,17 @@ def main():
     ap.add_argument("--root", required=True)
     ap.add_argument("--report")
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--by-time", action="store_true", help="仅在用户明确授权后按时间处理同目录旧版补文件")
     a = ap.parse_args()
     root = os.path.abspath(a.root)
-    report = a.report or os.path.join(root, REPORT_DIR, "archive_sync.json")
-    decisions = resolve(root, report, a.apply)
+    reports = list(Path(root, REPORT_DIR).glob("archive_sync*.json"))
+    latest = str(max(reports, key=lambda p: p.stat().st_mtime_ns)) if reports else ""
+    report = a.report or latest
+    decisions = resolve(root, report, a.apply, by_time=a.by_time)
     auto = sum(1 for d in decisions if d["保留"] != "未定")
     print("冲突 %d 对，可判定 %d 对，未判定 %d 对" % (len(decisions), auto, len(decisions) - auto))
-    print("清单:", os.path.join(root, REPORT_DIR, "decisions.csv"))
+    csv_reports = list(Path(root, REPORT_DIR).glob("decisions*.csv"))
+    print("清单:", max(csv_reports, key=lambda p: p.stat().st_mtime_ns))
     if not a.apply:
         print("（预演模式，未移动任何文件；加 --apply 执行）")
 
