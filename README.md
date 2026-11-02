@@ -23,13 +23,13 @@
 
 | 工具 | 职责 |
 |---|---|
-| `scripts/archive_sync.py` | 按需展开ZIP及补缺，按完整来源路径区分同名包；只是中间步骤 |
+| `scripts/archive_sync.py` | 按需展开ZIP及补缺，默认保留来源目录、包名和包内路径；只是中间步骤 |
 | `scripts/业务归类.py` | 按已核对的逐文件计划移动归位，预检漏项、改名、越界、目标冲突并回读核验 |
 | `scripts/resolve_conflicts.py` | 兼容历史补文件；普通整理不调用，另行授权后才启用`--by-time` |
 
 完整计划格式、预检与执行方式见 [SKILL.md](SKILL.md)。已归位或暂不能确定归属的文件，可在清单中以相同source、target登记原地保留。执行成功只证明清单操作完成，不能替代语义归属、压缩包展开状态和最终验收的判断。
 
-ZIP工具兼容UTF-8和GBK中文条目名，跳过压缩包内系统元数据；`config/mapping.example.json`支持archives、rules、scatter和exclude。exclude可使用相对根目录的完整包路径，也兼容旧的包名写法。内嵌包、损坏包、加密包及不支持的格式均保留原件并单列处理状态。
+ZIP工具默认区分不同来源包，核对后才通过显式映射合并落点，禁止解压写入已归属工具的内部报告区。兼容UTF-8和GBK中文条目名，跳过包内系统元数据；`config/mapping.example.json`支持archives、rules、scatter和exclude。exclude可使用相对根目录的完整包路径，也兼容旧的包名写法。内嵌包、损坏包、加密包及不支持的格式均保留原件并单列处理状态；展开或完整性失败后不再执行可选的散文件分流。
 
 ## 报告与异常
 

@@ -173,15 +173,19 @@ def route(zip_name, rel, cfg):
             routed_by_rule = True
             break
     result = "/".join([base] + parts) if base else "/".join(parts)
-    if not spec and not routed_by_rule and "/" in archive_rel:
-        result = archive_rel.rsplit("/", 1)[0] + "/" + result
+    if not spec and not routed_by_rule:
+        parent, _, filename = archive_rel.rpartition("/")
+        stem = os.path.splitext(filename)[0]
+        if result.split("/")[0].casefold() != stem.casefold():
+            result = stem + "/" + result
+        if parent:
+            result = parent + "/" + result
     return result
 
 
 def sync(root, cfg, apply_):
     """只负责解压补缺，不能据此宣称业务归类已完成。预演也保留待写路径索引。"""
     root = os.path.abspath(root)
-    report_root(root)
     idx = build_index(root)
     digests = {}
     report = {"root": root, "generated": datetime.now().strftime("%Y-%m-%d %H:%M"), "zips": {},
@@ -212,12 +216,15 @@ def sync(root, cfg, apply_):
                 if segments[0] == "__MACOSX" or segments[-1] == ".DS_Store" or segments[-1].startswith("._"):
                     res["skipped"] += 1
                     continue
+                dst = None
                 try:
                     safe_target(root, rel)
                     rel_target = route(zip_id, rel, cfg)
                     if not rel_target:
                         continue
                     dst = str(safe_target(root, rel_target))
+                    if any(Path(dst).is_relative_to(p) for p in owned_report_roots(root)):
+                        raise ValueError("解压目标进入内部报告区，请指定另一来源目录: " + rel_target)
                     h = hashlib.sha256()
                     with z.open(info) as src:
                         for block in iter(lambda: src.read(1 << 20), b""):
@@ -265,7 +272,7 @@ def sync(root, cfg, apply_):
                     res["copied"] += 1
                 except Exception as ex:
                     res["failed"] += 1
-                    report["failed"].append({"zip": zip_id, "file": rel, "reason": str(ex)})
+                    report["failed"].append({"zip": zip_id, "file": rel, "target": dst, "reason": str(ex)})
                     if isinstance(ex, (IntegrityError, OSError, zipfile.BadZipFile, RuntimeError)):
                         report["stopped"] = True
                         break
@@ -318,7 +325,7 @@ def main():
     root = os.path.abspath(a.root)
     cfg = load_config(a.config)
     report = sync(root, cfg, a.apply)
-    if a.scatter:
+    if a.scatter and not report.get("stopped", False) and not report["failed"]:
         report["scattered"] = scatter(root, cfg, a.apply)
         write_report(root, report)
     out = report["report_path"]
@@ -329,6 +336,7 @@ def main():
     print("报告:", out)
     if not a.apply:
         print("（预演仅写报告，未改动资料文件；加 --apply 执行。解压后仍需业务归类。）")
+    return 1 if report["failed"] else 0
 
 
 if __name__ == "__main__":

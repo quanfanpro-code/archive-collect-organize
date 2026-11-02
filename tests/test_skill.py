@@ -41,7 +41,8 @@ class Base(unittest.TestCase):
         if parent:
             os.makedirs(parent, exist_ok=True)
         self.root = tempfile.mkdtemp(prefix="aco_test_", dir=parent)
-        self.cfg = {"archives": {}, "rules": [], "scatter": {}, "fallback": "_待归类"}
+        self.cfg = {"archives": {"p.zip": {"target": ""}, "q.zip": {"target": ""}},
+                    "rules": [], "scatter": {}, "fallback": "_待归类"}
 
     def tearDown(self):
         pass
@@ -54,6 +55,39 @@ class Base(unittest.TestCase):
 
 
 class TestSync(Base):
+    def test_different_packages_in_same_directory_keep_source_context(self):
+        for name in ("来源甲.zip", "来源乙.zip"):
+            make_zip(os.path.join(self.root, name), [("资料/附件.txt", b"same", datetime(2026, 1, 1))])
+        result = self.run_sync()
+        self.assertEqual(len(result["copied"]), 2)
+        self.assertTrue(os.path.isfile(os.path.join(self.root, "来源甲", "资料", "附件.txt")))
+        self.assertTrue(os.path.isfile(os.path.join(self.root, "来源乙", "资料", "附件.txt")))
+
+    def test_zip_member_named_like_reports_remains_user_data(self):
+        make_zip(os.path.join(self.root, "来源.zip"), [("_整理报告/业务.txt", b"user", datetime(2026, 1, 1))])
+        result = self.run_sync()
+        self.assertFalse(result["failed"])
+        self.assertEqual(len([p for p in archive_sync.user_files(self.root) if p.name == "业务.txt"]), 1)
+
+    def test_explicit_zip_target_cannot_enter_internal_reports(self):
+        internal = archive_sync.report_root(self.root)
+        make_zip(os.path.join(self.root, "来源.zip"), [("业务.txt", b"user", datetime(2026, 1, 1))])
+        self.cfg["archives"]["来源.zip"] = {"target": internal.name}
+        result = self.run_sync()
+        self.assertTrue(result["failed"])
+        self.assertFalse((internal / "业务.txt").exists())
+
+    def test_integrity_stop_also_blocks_scatter_entrypoint(self):
+        report = {"zips": {}, "copied": [], "conflicts": [], "failed": [{"reason": "回读不一致"}],
+                  "stopped": True, "report_path": "mock.json"}
+        with patch.object(sys, "argv", ["archive_sync.py", "--root", self.root, "--apply", "--scatter"]), \
+             patch.object(archive_sync, "sync", return_value=report), \
+             patch.object(archive_sync, "scatter", return_value=[]) as scatter, \
+             patch.object(archive_sync, "write_report", return_value="mock.json"):
+            code = archive_sync.main()
+        scatter.assert_not_called()
+        self.assertEqual(code, 1)
+
     def test_unmarked_chinese_names_decode_utf8_and_gbk(self):
         for encoding in ("utf-8", "gbk"):
             info = zipfile.ZipInfo("资料/记录.txt".encode(encoding).decode("cp437"))
@@ -80,7 +114,7 @@ class TestSync(Base):
         self.assertEqual(len(result["zips"]), 2)
         self.assertEqual(len(result["copied"]), 2)
         for source in ("事项甲", "事项乙"):
-            self.assertTrue(os.path.isfile(os.path.join(self.root, source, "资料", "说明.txt")))
+            self.assertTrue(os.path.isfile(os.path.join(self.root, source, "附件", "资料", "说明.txt")))
 
     def test_user_old_version_directory_is_not_excluded(self):
         os.makedirs(os.path.join(self.root, "_旧版本"))
