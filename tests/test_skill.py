@@ -9,6 +9,8 @@ import tempfile
 import unittest
 import zipfile
 from datetime import datetime
+from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import archive_sync  # noqa: E402
@@ -52,6 +54,49 @@ class Base(unittest.TestCase):
 
 
 class TestSync(Base):
+    def test_unmarked_chinese_names_decode_utf8_and_gbk(self):
+        for encoding in ("utf-8", "gbk"):
+            info = zipfile.ZipInfo("资料/记录.txt".encode(encoding).decode("cp437"))
+            info.flag_bits = 0
+            self.assertEqual(archive_sync.member_name(info), "资料/记录.txt")
+
+    def test_exclude_configuration_and_system_metadata(self):
+        make_zip(os.path.join(self.root, "p.zip"),
+                 [(name, b"data", datetime(2026, 1, 1)) for name in
+                  ("__MACOSX/metadata", ".DS_Store", "._说明.txt", "说明.txt")])
+        make_zip(os.path.join(self.root, "保留.zip"), [("不能展开.txt", b"keep", datetime(2026, 1, 1))])
+        self.cfg["exclude"] = ["保留.zip"]
+        result = self.run_sync()
+        self.assertEqual(len(result["copied"]), 1)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "不能展开.txt")))
+        self.assertEqual(len(result["zips"]), 1)
+
+    def test_same_named_packages_preserve_source_context(self):
+        for source in ("事项甲", "事项乙"):
+            os.makedirs(os.path.join(self.root, source))
+            make_zip(os.path.join(self.root, source, "附件.zip"),
+                     [("资料/说明.txt", b"same", datetime(2026, 1, 1))])
+        result = self.run_sync()
+        self.assertEqual(len(result["zips"]), 2)
+        self.assertEqual(len(result["copied"]), 2)
+        for source in ("事项甲", "事项乙"):
+            self.assertTrue(os.path.isfile(os.path.join(self.root, source, "资料", "说明.txt")))
+
+    def test_user_old_version_directory_is_not_excluded(self):
+        os.makedirs(os.path.join(self.root, "_旧版本"))
+        make_zip(os.path.join(self.root, "_旧版本", "附件.zip"),
+                 [("资料/a.txt", b"same", datetime(2026, 1, 1))])
+        self.assertEqual(len(self.run_sync()["copied"]), 1)
+
+    def test_integrity_failure_stops_further_extraction(self):
+        make_zip(os.path.join(self.root, "p.zip"),
+                 [("a.txt", b"one", datetime(2026, 1, 1)),
+                  ("b.txt", b"two", datetime(2026, 1, 1))])
+        with patch.object(archive_sync, "sha256", return_value="wrong"):
+            result = self.run_sync()
+        self.assertTrue(result["failed"])
+        self.assertFalse(os.path.exists(os.path.join(self.root, "b.txt")))
+
     def test_same_content_skipped(self):
         write(os.path.join(self.root, "a.txt"), b"same", datetime(2024, 1, 1))
         make_zip(os.path.join(self.root, "p.zip"), [("a.txt", b"same", datetime(2026, 1, 1))])
@@ -222,6 +267,35 @@ class TestEvidence(Base):
 
 
 class TestBusiness(Base):
+    def test_user_report_directory_is_not_silently_ignored(self):
+        write(os.path.join(self.root, "_整理报告", "用户资料.txt"), b"user", datetime(2026, 1, 1))
+        write(os.path.join(self.root, "便笺.txt"), b"memo", datetime(2026, 1, 1))
+        result = business.organize(self.root, [{"source": "便笺.txt", "target": "记录/便笺.txt"}], True)
+        self.assertFalse(result["complete"])
+        self.assertEqual(len(result["unplanned"]), 1)
+        self.assertTrue(os.path.isfile(os.path.join(self.root, "便笺.txt")))
+
+    def test_nested_user_report_name_can_be_planned(self):
+        write(os.path.join(self.root, "用户数据", "_整理报告", "资料.txt"), b"user", datetime(2026, 1, 1))
+        result = business.organize(self.root, [{"source": "用户数据/_整理报告/资料.txt",
+                                               "target": "资料/资料.txt"}], True)
+        self.assertTrue(result["complete"])
+
+    def test_finalization_failure_still_records_moved_files(self):
+        moves = self.fixture()
+        rename = os.rename
+        def fail_on_empty_directory(src, dst):
+            if Path(src).is_dir():
+                raise PermissionError("模拟空目录归位失败")
+            return rename(src, dst)
+        with patch.object(business.os, "rename", side_effect=fail_on_empty_directory):
+            result = business.organize(self.root, moves, True)
+        self.assertFalse(result["complete"])
+        self.assertTrue(result["failed"])
+        self.assertTrue(Path(result["report_dir"], "结果.json").is_file())
+        for move in moves:
+            self.assertTrue(os.path.isfile(os.path.join(self.root, move["target"])))
+
     def fixture(self):
         write(os.path.join(self.root, "包一", "建筑", "G04", "目录.dwg"), b"same", datetime(2024, 1, 1))
         write(os.path.join(self.root, "包二", "建筑", "H01", "目录.dwg"), b"same", datetime(2026, 1, 1))

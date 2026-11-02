@@ -18,7 +18,51 @@ from datetime import datetime
 from pathlib import Path, PureWindowsPath
 
 REPORT_DIR = "_整理报告"
-SKIP_DIRS = {REPORT_DIR, "_旧版本"}
+REPORT_MARKER = ".archive-collect-organize.json"
+
+
+class IntegrityError(ValueError):
+    """写出结果与压缩包原内容不一致，必须停止后续写入。"""
+
+
+def owned_report_roots(root):
+    """只认带本工具标记的根级目录，不按目录名称排除用户资料。"""
+    owned = []
+    for path in Path(root).resolve().iterdir():
+        if path.is_symlink() or not path.is_dir():
+            continue
+        if path.name != REPORT_DIR and not path.name.startswith(REPORT_DIR + "-"):
+            continue
+        try:
+            marker = json.loads((path / REPORT_MARKER).read_text(encoding="utf-8"))
+            if marker == {"owner": "archive-collect-organize", "schema": 1}:
+                owned.append(path.resolve())
+        except (OSError, ValueError):
+            continue
+    return owned
+
+
+def report_root(root):
+    root = Path(root).resolve()
+    owned = owned_report_roots(root)
+    if owned:
+        return sorted(owned)[0]
+    candidate = Path(unique_path(str(root / REPORT_DIR)))
+    candidate.mkdir(exist_ok=False)
+    with (candidate / REPORT_MARKER).open("x", encoding="utf-8") as f:
+        json.dump({"owner": "archive-collect-organize", "schema": 1}, f)
+    return candidate
+
+
+def user_files(root):
+    """枚举全部用户文件，只跳过已核实归属本工具的内部报告根目录。"""
+    internal = set(owned_report_roots(root))
+    def fail(exc):
+        raise exc
+    for folder, dirs, files in os.walk(root, onerror=fail):
+        dirs[:] = [d for d in dirs if (Path(folder) / d).resolve() not in internal]
+        for name in files:
+            yield Path(folder) / name
 
 
 def norm(name):
@@ -68,15 +112,10 @@ def safe_target(root, rel):
 def build_index(root):
     """完整相对目标路径 -> [(大小, 绝对路径)]；不跨目录比较文件名。"""
     idx = {}
-    for dirpath, dirnames, files in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        for f in files:
-            p = os.path.join(dirpath, f)
-            try:
-                key = os.path.relpath(p, root).replace("\\", "/").casefold()
-                idx.setdefault(key, []).append((os.path.getsize(p), p))
-            except OSError:
-                continue
+    for path in user_files(root):
+        p = str(path)
+        key = os.path.relpath(p, root).replace("\\", "/").casefold()
+        idx.setdefault(key, []).append((path.stat().st_size, p))
     return idx
 
 
@@ -116,7 +155,8 @@ def load_config(path):
 
 def route(zip_name, rel, cfg):
     """决定压缩包内某个相对路径落到目标目录的哪个位置。"""
-    spec = cfg["archives"].get(zip_name)
+    archive_rel = zip_name.replace("\\", "/")
+    spec = cfg["archives"].get(archive_rel, cfg["archives"].get(archive_rel.split("/")[-1]))
     parts = rel.split("/")
     if spec:
         parts = strip_prefix(parts, spec.get("strip", []))
@@ -126,39 +166,42 @@ def route(zip_name, rel, cfg):
         parts = parts[1:] if len(parts) > 1 else parts
     if not parts:
         return None
+    routed_by_rule = False
     for rule in cfg["rules"]:
         if any(rule["match_dir"] == p for p in parts[:-1]):
             base = rule["target"]
+            routed_by_rule = True
             break
-    return "/".join([base] + parts) if base else "/".join(parts)
+    result = "/".join([base] + parts) if base else "/".join(parts)
+    if not spec and not routed_by_rule and "/" in archive_rel:
+        result = archive_rel.rsplit("/", 1)[0] + "/" + result
+    return result
 
 
 def sync(root, cfg, apply_):
     """只负责解压补缺，不能据此宣称业务归类已完成。预演也保留待写路径索引。"""
+    root = os.path.abspath(root)
+    report_root(root)
     idx = build_index(root)
     digests = {}
     report = {"root": root, "generated": datetime.now().strftime("%Y-%m-%d %H:%M"), "zips": {},
-              "copied": [], "conflicts": [], "failed": [], "stage": "仅解压补缺，业务归类另行执行"}
+              "copied": [], "conflicts": [], "failed": [], "stopped": False,
+              "stage": "仅解压补缺，业务归类另行执行"}
 
-    zips = []
-    for dirpath, dirnames, files in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        for f in files:
-            if f.lower().endswith(".zip"):
-                zips.append(os.path.join(dirpath, f))
-    zips.sort()
+    zips = sorted(str(p) for p in user_files(root) if p.suffix.lower() == ".zip")
 
     for zpath in zips:
         zip_name = os.path.basename(zpath)
-        if zip_name in cfg.get("exclude", []):
+        zip_id = os.path.relpath(zpath, root).replace("\\", "/")
+        if zip_name in cfg.get("exclude", []) or zip_id in cfg.get("exclude", []):
             continue
         res = {"copied": 0, "skipped": 0, "conflicts": 0, "failed": 0}
         try:
             z = zipfile.ZipFile(zpath)
         except Exception as e:
             res["failed"] += 1
-            report["failed"].append({"zip": zip_name, "reason": "解压失败: %s" % e})
-            report["zips"][zip_name] = res
+            report["failed"].append({"zip": zip_id, "reason": "解压失败: %s" % e})
+            report["zips"][zip_id] = res
             continue
         with z:
             for info in z.infolist():
@@ -171,7 +214,7 @@ def sync(root, cfg, apply_):
                     continue
                 try:
                     safe_target(root, rel)
-                    rel_target = route(zip_name, rel, cfg)
+                    rel_target = route(zip_id, rel, cfg)
                     if not rel_target:
                         continue
                     dst = str(safe_target(root, rel_target))
@@ -213,24 +256,28 @@ def sync(root, cfg, apply_):
                         moment = datetime(*info.date_time).timestamp()
                         os.utime(dst, (moment, moment))
                         if sha256(dst) != digest:
-                            raise ValueError("解压回读核验不一致: " + rel_target)
+                            raise IntegrityError("解压回读核验不一致: " + rel_target)
                     report["copied"].append({"path": os.path.relpath(dst, root), "size": info.file_size,
-                        "zip": zip_name, "source": rel, "zip_time": zip_time,
+                        "zip": zip_id, "source": rel, "zip_time": zip_time,
                         "sha256": digest, "written": bool(apply_)})
                     idx[key] = [(info.file_size, dst)]
                     digests[dst] = digest
                     res["copied"] += 1
                 except Exception as ex:
                     res["failed"] += 1
-                    report["failed"].append({"zip": zip_name, "file": rel, "reason": str(ex)})
-        report["zips"][zip_name] = res
+                    report["failed"].append({"zip": zip_id, "file": rel, "reason": str(ex)})
+                    if isinstance(ex, (IntegrityError, OSError, zipfile.BadZipFile, RuntimeError)):
+                        report["stopped"] = True
+                        break
+        report["zips"][zip_id] = res
+        if report["stopped"]:
+            break
     write_report(root, report)
     return report
 
 
 def write_report(root, report):
-    outdir = os.path.join(root, REPORT_DIR)
-    os.makedirs(outdir, exist_ok=True)
+    outdir = str(report_root(root))
     out = unique_path(os.path.join(outdir, "archive_sync.json"))
     report["report_path"] = out
     with open(out, "x", encoding="utf-8") as f:
